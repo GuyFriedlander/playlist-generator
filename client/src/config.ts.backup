@@ -1,0 +1,37 @@
+// Configuration for API endpoints
+const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+const isNgrok = window.location.hostname.includes('ngrok-free.app') || window.location.hostname.includes('ngrok.io');
+
+// API Base URL configuration
+export const API_BASE_URL = (() => {
+  if (isLocalhost) {
+    // When running locally, use relative URLs (proxy will handle it)
+    return 'http://localhost:3001';
+  } else if (isNgrok) {
+    // When running via ngrok, use the backend ngrok URL directly
+    return 'https://ef47-2a0d-6fc2-5d10-8200-fc84-7dc2-b4ad-e843.ngrok-free.app';
+  } else {
+    // For production or other environments
+    return '';
+  }
+})();
+
+// Helper function to build API URLs
+export const buildApiUrl = (endpoint: string): string => {
+  // Remove leading slash if present to avoid double slashes
+  const cleanEndpoint = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint;
+  
+  if (API_BASE_URL) {
+    return `${API_BASE_URL}/${cleanEndpoint}`;
+  } else {
+    return `/${cleanEndpoint}`;
+  }
+};
+
+// Log the configuration for debugging
+console.log('🔧 API Configuration:', {
+  hostname: window.location.hostname,
+  isLocalhost,
+  isNgrok,
+  apiBaseUrl: API_BASE_URL
+}); 

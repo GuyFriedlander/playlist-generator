@@ -1,0 +1,706 @@
+/// <reference path="./types/express-session.d.ts" />
+
+import express from 'express';
+import cors from 'cors';
+import multer from 'multer';
+import { v4 as uuidv4 } from 'uuid';
+import session from 'express-session';
+import path from 'path';
+import * as dotenv from 'dotenv';
+
+import { SpotifyOAuth } from './oauth';
+import { SpotifyService } from './spotifyService';
+import { CsvProcessor } from './csvProcessor';
+import { OpenAIService } from './openaiService';
+
+// Load environment variables
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// Helper functions for Hebrew text handling
+const containsHebrew = (text: string): boolean => {
+  return /[\u0590-\u05FF]/.test(text);
+};
+
+const sanitizeHebrewText = (text: string): string => {
+  return text
+    .replace(/[\u200E\u200F\u202A-\u202E]/g, '') // Remove existing directional marks
+    .trim();
+};
+
+const processTextForDisplay = (text: string): string => {
+  if (containsHebrew(text)) {
+    // Add directional marks for better RTL display
+    return `\u202B${sanitizeHebrewText(text)}\u202C`;
+  }
+  return sanitizeHebrewText(text);
+};
+
+// Configure multer for file uploads
+const upload = multer({ 
+  dest: 'uploads/',
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'text/csv' || file.originalname.endsWith('.csv')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only CSV files are allowed'));
+    }
+  }
+});
+
+// Middleware
+const allowedOrigins = [
+  process.env.CLIENT_URL || 'http://localhost:3000',
+  process.env.NGROK_CLIENT_URL || '',
+  'http://localhost:3000',
+  'http://192.168.1.196:3000', // Local network access
+  'https://2be9-2a0d-6fc2-5d10-8200-81ac-8e71-55ad-a1d5.ngrok-free.app', // Frontend ngrok URL
+  'https://e704-2a0d-6fc2-5d10-8200-81ac-8e71-55ad-a1d5.ngrok-free.app'  // Backend ngrok URL (for same-origin requests)
+].filter(Boolean);
+
+console.log(`🔧 CORS allowed origins configured:`, allowedOrigins);
+
+// Use standard cors middleware with explicit origin list
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'ngrok-skip-browser-warning'],
+  optionsSuccessStatus: 200
+}));
+
+// Handle ngrok warning bypass
+app.use((req, res, next) => {
+  // Add ngrok-skip-browser-warning header to bypass ngrok warning page
+  res.header('ngrok-skip-browser-warning', 'true');
+  next();
+});
+
+// Enhanced debugging for ngrok vs localhost issues
+app.use((req, res, next) => {
+  console.log(`🔍 Request details:`, {
+    method: req.method,
+    path: req.path,
+    origin: req.headers.origin,
+    host: req.headers.host,
+    'user-agent': req.headers['user-agent']?.substring(0, 50) + '...',
+    'x-forwarded-proto': req.headers['x-forwarded-proto'],
+    'x-forwarded-for': req.headers['x-forwarded-for'],
+    cookies: req.headers.cookie ? 'present' : 'missing',
+    sessionId: req.session?.id || 'no-session'
+  });
+  
+  // Log CORS response headers after they're set
+  const originalEnd = res.end;
+  res.end = function(chunk?: any, encoding?: any, cb?: any) {
+    if (req.headers.origin) {
+      console.log(`📤 Final response headers:`, {
+        'Access-Control-Allow-Origin': res.get('Access-Control-Allow-Origin'),
+        'Access-Control-Allow-Credentials': res.get('Access-Control-Allow-Credentials'),
+        'Set-Cookie': res.get('Set-Cookie') ? 'present' : 'missing'
+      });
+    }
+    return originalEnd.call(this, chunk, encoding, cb);
+  };
+  
+  next();
+});
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Remove explicit OPTIONS handler - let CORS middleware handle preflight requests
+
+// Session configuration
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'your-secret-key',
+  resave: false,
+  saveUninitialized: true, // Changed to true for OAuth flow
+  cookie: { 
+    secure: false, // Temporarily disable secure for ngrok debugging
+    httpOnly: false, // Allow JS access for mobile compatibility
+    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    sameSite: 'lax' // Try lax instead of none for better compatibility
+  }
+}));
+
+// Simple request logging
+app.use((req, res, next) => {
+  console.log(`📨 ${req.method} ${req.path} from origin: ${req.headers.origin || 'no-origin'}`);
+  next();
+});
+
+// In-memory storage for user sessions and data
+interface UserSession {
+  userId: string;
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+  songs?: any[];
+}
+
+interface OAuthSession {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  codeVerifier: string;
+  timestamp: number;
+}
+
+const userSessions = new Map<string, UserSession>();
+const oauthSessions = new Map<string, OAuthSession>();
+
+// Serve static files in production
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '../client/build')));
+}
+
+// Auth endpoints
+app.get('/api/auth/login', async (req, res) => {
+  try {
+    console.log(`🔐 Login request from origin: ${req.headers.origin}, user-agent: ${req.headers['user-agent']?.substring(0, 50)}...`);
+    console.log(`📱 Request headers:`, {
+      origin: req.headers.origin,
+      referer: req.headers.referer,
+      host: req.headers.host,
+      'content-type': req.headers['content-type']
+    });
+    
+    const clientId = process.env.SPOTIFY_CLIENT_ID!;
+    const clientSecret = process.env.SPOTIFY_CLIENT_SECRET!;
+    
+    if (!clientId || !clientSecret) {
+      return res.status(500).json({ error: 'Spotify credentials not configured' });
+    }
+
+    // Use ngrok URL if available, otherwise localhost
+    const baseUrl = process.env.NGROK_URL || `http://localhost:${PORT}`;
+    const redirectUri = `${baseUrl}/api/auth/callback`;
+    
+    const oauth = new SpotifyOAuth(clientId, clientSecret, redirectUri, 8888);
+    const sessionId = uuidv4();
+    
+    // Store OAuth data in memory (not browser session) 
+    oauthSessions.set(sessionId, {
+      clientId,
+      clientSecret,
+      redirectUri,
+      codeVerifier: oauth.getCodeVerifier,
+      timestamp: Date.now()
+    });
+    
+    // Create OAuth URL with sessionId as state parameter
+    const authUrl = oauth.buildAuthUrlWithState(sessionId);
+    
+    console.log(`🔗 OAuth redirect URI: ${redirectUri}`);
+    console.log(`🔗 OAuth URL generated: ${authUrl}`);
+    console.log(`🔑 Session ID stored in memory: ${sessionId}`);
+    
+    res.json({ 
+      success: true,
+      authUrl: authUrl,
+      sessionId: sessionId
+    });
+  } catch (error) {
+    console.error('Auth error:', error);
+    res.status(500).json({ error: 'Authentication failed' });
+  }
+});
+
+// OAuth callback handler
+app.get('/api/auth/callback', async (req, res) => {
+  try {
+    const { code, error, state } = req.query;
+    
+    // Use ngrok URL for client if available
+    const clientUrl = process.env.NGROK_CLIENT_URL || process.env.CLIENT_URL || 'http://localhost:3000';
+    
+    console.log(`📞 OAuth callback received - code: ${code ? 'present' : 'missing'}, error: ${error || 'none'}, state: ${state || 'missing'}`);
+    
+    if (error) {
+      console.log(`❌ OAuth error: ${error}`);
+      return res.redirect(`${clientUrl}?error=${encodeURIComponent(error as string)}`);
+    }
+    
+    if (!code) {
+      console.log(`❌ No authorization code received`);
+      return res.redirect(`${clientUrl}?error=no_code`);
+    }
+    
+    if (!state) {
+      console.log(`❌ No state parameter received`);
+      return res.redirect(`${clientUrl}?error=no_state`);
+    }
+    
+    // Get OAuth session data from memory using state parameter
+    const oauthData = oauthSessions.get(state as string);
+    if (!oauthData) {
+      console.log(`❌ No OAuth session found for state: ${state}`);
+      return res.redirect(`${clientUrl}?error=session_expired`);
+    }
+    
+    console.log(`✅ Found OAuth session for state: ${state}`);
+    
+    // Clean up old sessions (older than 10 minutes)
+    const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
+    for (const [sessionId, sessionData] of oauthSessions.entries()) {
+      if (sessionData.timestamp < tenMinutesAgo) {
+        oauthSessions.delete(sessionId);
+      }
+    }
+    
+    // Recreate OAuth instance with stored data
+    const oauth = new SpotifyOAuth(oauthData.clientId, oauthData.clientSecret, oauthData.redirectUri);
+    
+    // Set the code verifier for PKCE
+    oauth['codeVerifier'] = oauthData.codeVerifier;
+    
+    // Exchange code for tokens
+    const tokens = await oauth.exchangeCodeForTokens(code as string);
+    
+    // Get user info
+    const spotifyService = new SpotifyService(tokens.access_token, process.env.SPOTIFY_CLIENT_ID!, process.env.SPOTIFY_CLIENT_SECRET!);
+    const user = await spotifyService.getCurrentUser();
+    
+    // Store user session with same ID as OAuth session (state)
+    userSessions.set(state as string, {
+      userId: user.id,
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token,
+      expiresAt: Date.now() + (3600 * 1000) // 1 hour
+    });
+    
+    // Clean up OAuth session as it's no longer needed
+    oauthSessions.delete(state as string);
+    
+    console.log(`✅ User authenticated: ${user.display_name} (${user.id})`);
+    
+    // Redirect back to client with success
+    res.redirect(`${clientUrl}?auth=success&session=${state}&user=${encodeURIComponent(user.display_name)}`);
+    
+  } catch (error) {
+    console.error('Callback error:', error);
+    const clientUrl = process.env.NGROK_CLIENT_URL || process.env.CLIENT_URL || 'http://localhost:3000';
+    res.redirect(`${clientUrl}?error=auth_failed`);
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const sessionId = req.body.sessionId;
+  if (sessionId && userSessions.has(sessionId)) {
+    userSessions.delete(sessionId);
+  }
+  req.session.destroy(() => {
+    res.json({ success: true });
+  });
+});
+
+// Get user music preferences endpoint
+app.get('/api/user-preferences/:sessionId', async (req, res) => {
+  try {
+    const sessionId = req.params.sessionId;
+    const userSession = userSessions.get(sessionId);
+    
+    console.log(`🎵 User preferences request for session: ${sessionId}`);
+    
+    if (!userSession) {
+      console.log(`❌ Session not found: ${sessionId}`);
+      return res.status(401).json({ error: 'Invalid session' });
+    }
+
+    const spotifyService = new SpotifyService(
+      userSession.accessToken,
+      process.env.SPOTIFY_CLIENT_ID!,
+      process.env.SPOTIFY_CLIENT_SECRET!
+    );
+
+    const preferences = await spotifyService.getUserMusicPreferences();
+    
+    // Process Hebrew text in preferences for better display
+    const processedTopTracks = preferences.topTracks.map(track => ({
+      ...track,
+      name: processTextForDisplay(track.name),
+      artists: track.artists?.map(artist => ({
+        ...artist,
+        name: processTextForDisplay(artist.name)
+      })) || []
+    }));
+
+    const processedTopArtists = preferences.topArtists.map(artist => ({
+      ...artist,
+      name: processTextForDisplay(artist.name)
+    }));
+    
+    console.log(`✅ Retrieved user preferences: ${preferences.topTracks.length} tracks, ${preferences.topArtists.length} artists (with Hebrew text processing)`);
+    
+    res.json({
+      success: true,
+      topTracks: processedTopTracks,
+      topArtists: processedTopArtists
+    });
+  } catch (error) {
+    console.error('Failed to get user preferences:', error);
+    res.status(500).json({ error: 'Failed to get user preferences' });
+  }
+});
+
+// File upload endpoint (kept for backward compatibility)
+app.post('/api/upload-csv', upload.single('csvFile'), async (req, res) => {
+  try {
+    const sessionId = req.body.sessionId;
+    if (!sessionId || !userSessions.has(sessionId)) {
+      return res.status(401).json({ error: 'Invalid session' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const userSession = userSessions.get(sessionId)!;
+    const csvProcessor = new CsvProcessor();
+    const songs = await csvProcessor.processCsvFile(req.file.path);
+    
+    // Store songs in user session
+    userSession.songs = songs;
+    
+    res.json({ 
+      success: true, 
+      songsCount: songs.length,
+      songs: songs.slice(0, 5) // Return first 5 for preview
+    });
+  } catch (error) {
+    console.error('CSV upload error:', error);
+    res.status(500).json({ error: 'Failed to process CSV file' });
+  }
+});
+
+// AI song generation endpoint
+app.post('/api/generate-songs', async (req, res) => {
+  try {
+    const { sessionId, prompt, languages, count, includeUserPreferences = true } = req.body;
+    
+    if (!sessionId || !userSessions.has(sessionId)) {
+      return res.status(401).json({ error: 'Invalid session' });
+    }
+
+    if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+      return res.status(400).json({ error: 'Valid prompt is required' });
+    }
+
+    if (!Array.isArray(languages)) {
+      return res.status(400).json({ error: 'Languages must be an array' });
+    }
+
+    const openaiApiKey = process.env.OPENAI_API_KEY;
+    if (!openaiApiKey) {
+      return res.status(500).json({ error: 'OpenAI API key not configured' });
+    }
+
+    const userSession = userSessions.get(sessionId)!;
+    
+    // Process and sanitize the user prompt for Hebrew support
+    const sanitizedPrompt = sanitizeHebrewText(prompt.trim());
+    const isHebrewPrompt = containsHebrew(sanitizedPrompt);
+    let enhancedPrompt = sanitizedPrompt;
+    
+    // Fetch user preferences to personalize the prompt
+    if (includeUserPreferences) {
+      try {
+        const spotifyService = new SpotifyService(
+          userSession.accessToken,
+          process.env.SPOTIFY_CLIENT_ID!,
+          process.env.SPOTIFY_CLIENT_SECRET!
+        );
+
+        console.log(`🎯 Fetching user preferences to personalize recommendations for session: ${sessionId}...`);
+        const preferences = await spotifyService.getUserMusicPreferences();
+        
+        console.log(`📊 User preferences fetched:`);
+        console.log(`   - Top artists found: ${preferences.topArtists.length}`);
+        console.log(`   - Top tracks found: ${preferences.topTracks.length}`);
+        
+        if (preferences.topArtists.length > 0) {
+          const artistsForLog = preferences.topArtists.map(a => processTextForDisplay(a.name)).join(', ');
+          console.log(`🎤 Top artists: ${artistsForLog}`);
+        }
+        
+        if (preferences.topTracks.length > 0) {
+          const tracksForLog = preferences.topTracks.map(t => 
+            `"${processTextForDisplay(t.name)}" by ${t.artists?.map(a => processTextForDisplay(a.name)).join(', ') || 'Unknown'}`
+          ).join(', ');
+          console.log(`🎵 Top tracks: ${tracksForLog}`);
+        }
+        
+        if (preferences.topTracks.length > 0 || preferences.topArtists.length > 0) {
+          let preferenceContext = "\n\nBased on the user's Spotify listening history, here are some of their favorite artists and songs to help you understand their music taste:";
+          
+          if (preferences.topArtists.length > 0) {
+            // Process Hebrew artist names properly for AI prompt
+            const artistNames = preferences.topArtists.map(artist => sanitizeHebrewText(artist.name)).join(', ');
+            preferenceContext += `\nFavorite Artists: ${artistNames}`;
+          }
+          
+          if (preferences.topTracks.length > 0) {
+            // Process Hebrew track names and artist names properly for AI prompt
+            const trackInfo = preferences.topTracks.map(track => 
+              `"${sanitizeHebrewText(track.name)}" by ${track.artists?.map(a => sanitizeHebrewText(a.name)).join(', ') || 'Unknown'}`
+            ).join(', ');
+            preferenceContext += `\nFavorite Songs: ${trackInfo}`;
+          }
+          
+          if (isHebrewPrompt) {
+            preferenceContext += "\n\nThe user's prompt is in Hebrew. Please consider their musical taste when generating songs, but prioritize the Hebrew request above. Include Hebrew songs if they match the request.";
+          } else {
+            preferenceContext += "\n\nPlease consider this musical taste when generating songs, but still prioritize the user's specific request above.";
+          }
+          
+          enhancedPrompt += preferenceContext;
+          
+          console.log(`✅ Successfully enhanced prompt with user preferences (Hebrew support: ${isHebrewPrompt ? 'YES' : 'NO'})`);
+        } else {
+          console.log(`⚠️ No user preferences found - using original prompt only`);
+        }
+      } catch (error) {
+        console.log(`❌ Error fetching user preferences for session ${sessionId}:`, error);
+        console.log(`🔄 Continuing with original prompt only`);
+      }
+    }
+
+    const songCount = Math.min(count || 25, 50); // Limit to 50 songs max
+    
+    // Log the complete prompt details
+    console.log(`🤖 Generating ${songCount} songs for session: ${sessionId}`);
+    console.log(`🎵 Languages: [${languages.join(', ')}]`);
+    console.log(`📝 Original user prompt: "${prompt.trim()}"`);
+    console.log(`🔄 Enhanced prompt enabled: ${includeUserPreferences}`);
+    
+    if (includeUserPreferences && enhancedPrompt !== prompt.trim()) {
+      console.log(`📈 FULL ENHANCED PROMPT SENT TO AI:`);
+      console.log(`=====================================`);
+      console.log(enhancedPrompt);
+      console.log(`=====================================`);
+    } else {
+      console.log(`📋 FINAL PROMPT SENT TO AI:`);
+      console.log(`============================`);
+      console.log(enhancedPrompt);
+      console.log(`============================`);
+    }
+    
+    const openaiService = new OpenAIService(openaiApiKey);
+    const generatedPlaylist = await openaiService.generateSongs({
+      prompt: enhancedPrompt,
+      languages: languages,
+      count: songCount
+    });
+
+    // Store generated songs in user session
+    userSession.songs = generatedPlaylist.songs;
+    
+    console.log(`✅ Generated playlist "${generatedPlaylist.name}" with ${generatedPlaylist.songs.length} songs for session ${sessionId}`);
+    console.log(`🎶 Sample songs generated: ${generatedPlaylist.songs.slice(0, 3).map(s => `"${s.title}" by ${s.artist}`).join(', ')}`);
+    console.log(`📊 AI Generation Summary:`);
+    console.log(`   - User prompt: "${prompt.trim()}"`);
+    console.log(`   - Enhanced with preferences: ${includeUserPreferences && enhancedPrompt !== prompt.trim() ? 'YES' : 'NO'}`);
+    console.log(`   - Languages: [${languages.join(', ')}]`);
+    console.log(`   - Songs generated: ${generatedPlaylist.songs.length}/${songCount}`);
+    console.log(`   - Playlist name: "${generatedPlaylist.name}"`);
+    
+    res.json({ 
+      success: true, 
+      songsCount: generatedPlaylist.songs.length,
+      songs: generatedPlaylist.songs.slice(0, 5), // Return first 5 for preview
+      playlistName: generatedPlaylist.name,
+      prompt: prompt.trim(),
+      enhancedPrompt: includeUserPreferences,
+      languages: languages
+    });
+  } catch (error) {
+    console.error(`❌ AI song generation failed for session ${req.body.sessionId}:`, error);
+    console.error(`📝 Failed prompt: "${req.body.prompt?.trim() || 'N/A'}"`);
+    console.error(`🎵 Requested languages: [${Array.isArray(req.body.languages) ? req.body.languages.join(', ') : 'N/A'}]`);
+    console.error(`🔢 Requested song count: ${req.body.count || 'N/A'}`);
+    
+    res.status(500).json({ 
+      error: error instanceof Error ? error.message : 'Failed to generate songs with AI' 
+    });
+  }
+});
+
+// Song matching endpoint
+app.post('/api/match-songs', async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    if (!sessionId || !userSessions.has(sessionId)) {
+      return res.status(401).json({ error: 'Invalid session' });
+    }
+
+    const userSession = userSessions.get(sessionId)!;
+    if (!userSession.songs || userSession.songs.length === 0) {
+      return res.status(400).json({ error: 'No songs to match' });
+    }
+
+    const spotifyService = new SpotifyService(
+      userSession.accessToken, 
+      process.env.SPOTIFY_CLIENT_ID!, 
+      process.env.SPOTIFY_CLIENT_SECRET!
+    );
+
+    const matchedSongs = [];
+    const skippedSongs = [];
+
+    for (const song of userSession.songs) {
+      try {
+        const track = await spotifyService.searchTrack(song.title, song.artist);
+        if (track) {
+                      matchedSongs.push({
+              original: song,
+              spotify: {
+                id: track.id,
+                name: track.name,
+                artists: track.artists.map((a: any) => a.name),
+                uri: track.uri,
+                albumArt: track.album?.images?.[0]?.url || null,
+                previewUrl: track.preview_url
+              }
+            });
+        } else {
+          skippedSongs.push(song);
+        }
+        
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 100));
+      } catch (error) {
+        console.error(`Error matching song "${song.title}":`, error);
+        skippedSongs.push(song);
+      }
+    }
+
+    // Store matched songs in session
+    userSession.songs = matchedSongs;
+    
+    res.json({
+      success: true,
+      matchedCount: matchedSongs.length,
+      skippedCount: skippedSongs.length,
+      songs: matchedSongs,
+      skippedSongs
+    });
+  } catch (error) {
+    console.error('Song matching error:', error);
+    res.status(500).json({ error: 'Failed to match songs with Spotify' });
+  }
+});
+
+// Get songs for swiping
+app.get('/api/songs/:sessionId', (req, res) => {
+  const sessionId = req.params.sessionId;
+  const userSession = userSessions.get(sessionId);
+  
+  if (!userSession || !userSession.songs) {
+    return res.status(404).json({ error: 'No songs found' });
+  }
+  
+  res.json({ songs: userSession.songs });
+});
+
+// Create playlist
+app.post('/api/create-playlist', async (req, res) => {
+  try {
+    const { sessionId, playlistName, selectedSongs } = req.body;
+    const userSession = userSessions.get(sessionId);
+    
+    console.log(`🎶 Playlist creation request - sessionId: ${sessionId}, playlistName: "${playlistName}"`);
+    console.log(`📊 Selected songs received: ${selectedSongs?.length || 0}`);
+    
+    if (!userSession) {
+      console.log(`❌ Session not found for sessionId: ${sessionId}`);
+      return res.status(401).json({ error: 'Invalid session' });
+    }
+
+    if (!selectedSongs || !Array.isArray(selectedSongs) || selectedSongs.length === 0) {
+      console.log(`❌ No selected songs provided`);
+      return res.status(400).json({ error: 'No selected songs provided' });
+    }
+
+    const spotifyService = new SpotifyService(
+      userSession.accessToken,
+      process.env.SPOTIFY_CLIENT_ID!,
+      process.env.SPOTIFY_CLIENT_SECRET!
+    );
+
+    // Create playlist
+    const playlist = await spotifyService.createPlaylist(
+      userSession.userId,
+      playlistName || 'My Music Selector Playlist',
+      'Playlist created with Music Selector app'
+    );
+
+    // Add tracks to playlist
+    const trackUris = selectedSongs.map(song => song.spotify.uri);
+    console.log(`🎵 Adding ${trackUris.length} tracks to playlist "${playlist.name}"`);
+    await spotifyService.addTracksToPlaylist(playlist.id, trackUris);
+
+    console.log(`✅ Playlist created successfully: "${playlist.name}" with ${trackUris.length} tracks`);
+    res.json({
+      success: true,
+      playlist: {
+        id: playlist.id,
+        name: playlist.name,
+        url: playlist.external_urls.spotify,
+        trackCount: trackUris.length
+      }
+    });
+  } catch (error) {
+    console.error('Playlist creation error:', error);
+    res.status(500).json({ error: 'Failed to create playlist' });
+  }
+});
+
+// Health check endpoint with detailed info
+app.get('/api/health', (req, res) => {
+  console.log(`💓 Health check called from origin: ${req.headers.origin}`);
+  res.json({ 
+    status: 'OK', 
+    timestamp: new Date().toISOString(),
+    origin: req.headers.origin,
+    host: req.headers.host,
+    userAgent: req.headers['user-agent']?.substring(0, 50) + '...'
+  });
+});
+
+// Simple test endpoint without credentials
+app.get('/api/test', (req, res) => {
+  console.log(`🧪 Test endpoint called from origin: ${req.headers.origin}`);
+  console.log(`🧪 All headers:`, req.headers);
+  res.json({ 
+    message: 'Test successful!',
+    origin: req.headers.origin,
+    host: req.headers.host,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Serve React app in production
+if (process.env.NODE_ENV === 'production') {
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, '../client/build/index.html'));
+  });
+}
+
+app.listen(PORT, () => {
+  console.log(`🎵 Music Selector server running on port ${PORT}`);
+  console.log(`🌐 API available at http://localhost:${PORT}/api`);
+  
+  if (process.env.NODE_ENV !== 'production') {
+    const frontendUrl = process.env.NGROK_CLIENT_URL;
+    const localFrontend = `http://localhost:3000`;
+    
+    if (frontendUrl) {
+      console.log(`🌐 Frontend available at: ${frontendUrl} (ngrok)`);
+      console.log(`🖥️  Frontend also running locally at: ${localFrontend}`);
+    } else {
+      console.log(`🖥️  Frontend should be running on ${localFrontend}`);
+    }
+  }
+}); 

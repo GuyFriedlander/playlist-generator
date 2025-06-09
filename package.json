@@ -1,0 +1,37 @@
+{
+  "name": "music-selector",
+  "version": "1.0.0",
+  "description": "A fullstack web application that creates Spotify playlists from CSV files with a Tinder-like song selection interface",
+  "private": true,
+  "scripts": {
+    "install:all": "npm run install:server && npm run install:client",
+    "install:server": "cd server && npm install",
+    "install:client": "cd client && npm install",
+    "build": "npm run build:server && npm run build:client",
+    "build:server": "cd server && npm run build",
+    "build:client": "cd client && npm run build",
+    "start": "cd server && npm start",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm start",
+    "dev:ngrok": "echo '🌐 Starting with ngrok (HTTPS)...' && echo '1. Run: npm run ngrok (in new terminal)' && echo '2. Update Spotify redirect URI' && echo '3. Then run: npm run dev' && echo ''",
+    "ngrok": "./start-ngrok.sh",
+    "ngrok:windows": "start-ngrok.bat",
+    "status": "cd server && ./check-status.sh",
+    "clean": "rm -rf server/dist && rm -rf client/build && rm -rf server/node_modules && rm -rf client/node_modules"
+  },
+  "keywords": [
+    "spotify",
+    "playlist",
+    "csv",
+    "typescript",
+    "react",
+    "tinder",
+    "music"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+} 

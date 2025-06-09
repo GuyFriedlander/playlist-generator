@@ -1,0 +1,42 @@
+/* LoadingSpinner.css */
+.loading-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  width: 100%;
+}
+
+.spinner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: linear-gradient(45deg, #C4B7D1, #7BB9B2);
+  animation: spin 2s linear infinite;
+  margin-bottom: 1rem;
+}
+
+.spotify-logo {
+  font-size: 2rem;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.loading-container p {
+  font-size: 1.2rem;
+  color: rgba(255, 255, 255, 0.8);
+  margin: 0;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+} 

@@ -1,0 +1,181 @@
+/* FileUpload.css */
+.file-upload-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 100%;
+}
+
+.upload-container {
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  border-radius: 20px;
+  padding: 3rem;
+  max-width: 600px;
+  width: 100%;
+  text-align: center;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+.upload-container h2 {
+  margin-bottom: 1rem;
+  font-size: 2.5rem;
+  background: linear-gradient(45deg, #C4B7D1, #7BB9B2);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.upload-container > p {
+  font-size: 1.2rem;
+  margin-bottom: 2rem;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.upload-area {
+  border: 3px dashed rgba(255, 255, 255, 0.3);
+  border-radius: 20px;
+  padding: 3rem;
+  margin: 2rem 0;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.upload-area:hover {
+  border-color: #C4B7D1;
+  background: rgba(29, 185, 84, 0.1);
+  transform: translateY(-2px);
+}
+
+.upload-area.drag-active {
+  border-color: #7BB9B2;
+  background: rgba(30, 215, 96, 0.2);
+  transform: scale(1.02);
+}
+
+.upload-area.uploading {
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+.upload-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+.upload-icon {
+  font-size: 4rem;
+  margin-bottom: 1rem;
+  opacity: 0.7;
+}
+
+.upload-content h3 {
+  margin: 0;
+  font-size: 1.5rem;
+  color: #7BB9B2;
+}
+
+.upload-content > p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 1.1rem;
+}
+
+.file-requirements {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  text-align: left;
+}
+
+.file-requirements p {
+  margin: 0 0 0.5rem 0;
+  color: #7BB9B2;
+  font-weight: bold;
+}
+
+.file-requirements ul {
+  margin: 0;
+  padding-left: 1.5rem;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.file-requirements li {
+  margin-bottom: 0.25rem;
+}
+
+.upload-progress {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+.spinner-small {
+  font-size: 2rem;
+  animation: spin 1s linear infinite;
+}
+
+.upload-progress p {
+  margin: 0;
+  font-size: 1.2rem;
+  color: #7BB9B2;
+}
+
+.example-section {
+  margin-top: 2rem;
+  text-align: left;
+}
+
+.example-section h4 {
+  margin-bottom: 1rem;
+  color: #7BB9B2;
+}
+
+.csv-example {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 1rem;
+  border-radius: 10px;
+  border-left: 4px solid #C4B7D1;
+}
+
+.csv-example code {
+  font-family: 'Courier New', monospace;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .upload-container {
+    padding: 2rem 1rem;
+    margin: 1rem;
+  }
+  
+  .upload-container h2 {
+    font-size: 2rem;
+  }
+  
+  .upload-area {
+    padding: 2rem 1rem;
+  }
+  
+  .upload-icon {
+    font-size: 3rem;
+  }
+  
+  .upload-content h3 {
+    font-size: 1.3rem;
+  }
+} 
