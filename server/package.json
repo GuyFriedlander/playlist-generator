@@ -1,7 +1,7 @@
 {
   "name": "music-selector-server",
   "version": "1.0.0",
-  "description": "Backend server for Music Selector - Spotify playlist creation with CSV upload",
+  "description": "Backend server for Music Selector - AI-powered Spotify playlist creation",
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc -p tsconfig.server.json",
@@ -13,7 +13,7 @@
   "keywords": [
     "spotify",
     "playlist",
-    "csv",
+    "ai",
     "typescript",
     "express",
     "oauth",

@@ -2,7 +2,6 @@
 
 import express from 'express';
 import cors from 'cors';
-import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
 import session from 'express-session';
 import path from 'path';
@@ -10,7 +9,7 @@ import * as dotenv from 'dotenv';
 
 import { SpotifyOAuth } from './oauth';
 import { SpotifyService } from './spotifyService';
-import { CsvProcessor } from './csvProcessor';
+
 import { OpenAIService } from './openaiService';
 
 // Load environment variables
@@ -38,17 +37,7 @@ const processTextForDisplay = (text: string): string => {
   return sanitizeHebrewText(text);
 };
 
-// Configure multer for file uploads
-const upload = multer({ 
-  dest: 'uploads/',
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'text/csv' || file.originalname.endsWith('.csv')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only CSV files are allowed'));
-    }
-  }
-});
+
 
 // Middleware
 const allowedOrigins = [
@@ -345,35 +334,7 @@ app.get('/api/user-preferences/:sessionId', async (req, res) => {
   }
 });
 
-// File upload endpoint (kept for backward compatibility)
-app.post('/api/upload-csv', upload.single('csvFile'), async (req, res) => {
-  try {
-    const sessionId = req.body.sessionId;
-    if (!sessionId || !userSessions.has(sessionId)) {
-      return res.status(401).json({ error: 'Invalid session' });
-    }
 
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    const userSession = userSessions.get(sessionId)!;
-    const csvProcessor = new CsvProcessor();
-    const songs = await csvProcessor.processCsvFile(req.file.path);
-    
-    // Store songs in user session
-    userSession.songs = songs;
-    
-    res.json({ 
-      success: true, 
-      songsCount: songs.length,
-      songs: songs.slice(0, 5) // Return first 5 for preview
-    });
-  } catch (error) {
-    console.error('CSV upload error:', error);
-    res.status(500).json({ error: 'Failed to process CSV file' });
-  }
-});
 
 // AI song generation endpoint
 app.post('/api/generate-songs', async (req, res) => {
